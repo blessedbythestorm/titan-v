@@ -1,0 +1,7 @@
+[lib]
+name = "{lib_name}" # Replace with the desired library name
+path = "src/lib.rs"
+
+[[bin]]
+name = "{bin_name}"  # Replace with your binary name
+path = "src/main.rs"

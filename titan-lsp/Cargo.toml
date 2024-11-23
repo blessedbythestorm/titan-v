@@ -1,0 +1,10 @@
+[package]
+name = "titan-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.ad-astra]
+version = "1.0.0"
+
+[dependencies.titan_viewer]
+path = "../titan-viewer"

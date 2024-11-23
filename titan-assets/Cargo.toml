@@ -1,0 +1,14 @@
+[package]
+name = "titan_assets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.titan_core]
+path = "../titan-core"
+
+[dependencies.serde]
+version = "1.0.210"
+features = ["derive"]
+
+[dependencies.ad-astra]
+version = "1.0.0"

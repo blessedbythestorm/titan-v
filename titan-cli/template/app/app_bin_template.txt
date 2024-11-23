@@ -1,0 +1,4 @@
+fn main() -> titan::Result<()> {
+    {lib_name}::entry()?;
+    Ok(())
+}

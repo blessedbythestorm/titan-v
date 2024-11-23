@@ -1,0 +1,13 @@
+[language-server.adastra-lsp]
+command = "{app_path}/tools/titan-lsp/target/release/titan-lsp"
+
+[[language]]
+name = "adastra"
+language-servers = ["adastra-lsp"]
+file-types = ["adastra", "aa"]
+scope = "source.adastra"
+comment-tokens = ["//", "/*", "*/"]
+
+[[grammar]]
+name = "adastra"
+source = { path = "{app_path}/.helix/runtime/grammars/sources/adastra" }

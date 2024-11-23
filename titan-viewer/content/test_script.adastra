@@ -1,0 +1,5 @@
+let res = hello_app();
+
+// titan.enginequit();
+
+return res;

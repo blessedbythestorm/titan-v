@@ -1,0 +1,18 @@
+[package]
+name = "titan_viewer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "titan_viewer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "titan-viewer"
+path = "src/main.rs"
+
+[dependencies.titan]
+path = "../titan"
+
+[dependencies.ad-astra]
+version = "1.0.0"

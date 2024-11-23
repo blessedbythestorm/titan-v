@@ -1,0 +1,21 @@
+[package]
+name = "titan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+titan_core = { path = "../titan-core" }
+orx-concurrent-option = "1.3.0"
+ad-astra = "1.0.0"
+
+# [dependencies.titan-macro]
+# path = "../titan-macro"
+
+[dependencies.ratatui]
+version = "0.28.1"
+
+[dependencies.tui-logger]
+version = "0.13.2"
+
+[dependencies.wgpu]
+version = "22.0.0"
