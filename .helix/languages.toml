@@ -1,0 +1,24 @@
+[language-server.adastra-lsp]
+command = "/home/stormblessed/dev/titan/target/release/titan-lsp"
+
+[[language]]
+name = "adastra"
+language-servers = ["adastra-lsp"]
+file-types = ["adastra", "aa"]
+scope = "source.adastra"
+comment-tokens = ["//", "/*", "*/"]
+
+[[grammar]]
+name = "adastra"
+source = { path = "/home/stormblessed/dev/titan/.helix/runtime/grammars/sources/adastra" }
+
+[[language]]
+name = "rune"
+language-servers = ["rune-languageserver"]
+file-types = ["rn"]
+scope = "source.rune"
+comment-tokens = ["//"]
+
+[[grammar]]
+name = "rune"
+source = { path = "/home/stormblessed/dev/tutan/.helix/runtime/grammars/sources/rune" }

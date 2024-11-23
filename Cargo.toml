@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+  "titan",
+  "titan-core",
+  "titan-assets",
+  "titan-viewer", 
+  "titan-lsp", 
+  "titan-cli"
+, "titan-macro"]

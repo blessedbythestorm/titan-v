@@ -1,0 +1,7 @@
+edition = "2024"
+indent_style = "Block"
+blank_lines_lower_bound = 1
+empty_item_single_line = false
+fn_single_line = true
+format_strings = true
+chain_width = 40
