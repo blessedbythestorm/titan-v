@@ -1,4 +1,5 @@
-use crate::{engine, tasks, Channels};
+use crate::engine;
+
 use ratatui::{
     backend::CrosstermBackend,
     crossterm::event::{self, Event},
@@ -7,11 +8,11 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Row, Table},
     Frame, Terminal,
 };
-use std::{io::Stdout, ops::Deref, sync::Arc};
-use titan_core::{async_trait, runtime::sync::Mutex, Result, Subsystem, Task};
+use std::io::Stdout;
+use titan_core::{info, tasks, tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}, ArcLock, Channels, Result};
 use tui_logger::{TuiLoggerLevelOutput, TuiLoggerWidget};
 
-type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
+type TitanTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub enum TermView {
     Tasks,
@@ -20,52 +21,70 @@ pub enum TermView {
 
 pub struct TerminalSubsystem {
     pub channels: Channels,
-    pub terminal: Arc<Mutex<Option<CrosstermTerminal>>>,
-    pub view: Arc<Mutex<TermView>>,
+    pub terminal: ArcLock<Option<TitanTerminal>>,
+    pub view: ArcLock<TermView>,
+    pub mut_test: bool,
 }
 
+#[titan_core::subsystem]
 impl TerminalSubsystem {
-    async fn init(&self) -> Result<()> {
-        tui_logger::init_logger(titan_core::log::LevelFilter::Trace)?;
 
-        *self.terminal.lock().await = Some(ratatui::init());
+    #[titan_core::task]
+    async fn init(&self) -> Result<()> {        
+        tui_logger::init_logger(titan_core::log::LevelFilter::Trace)?;
+                        
+        self.terminal.write(Some(ratatui::init()))
+         .await;
+        
+        Ok(())
+    }
+    
+    #[titan_core::task]
+    pub async fn mutable_task(&mut self) -> Result<()> {
+        self.mut_test = !self.mut_test;
+        info!("{}", self.mut_test);
         Ok(())
     }
 
-    async fn render(&self) -> Result<()> {
-        let task_displays = self
-            .channels
-            .tasks
-            .send(tasks::GetTaskDisplays)
-            .await?;
+    #[titan_core::task(benchmark)]
+    async fn render(&mut self) -> Result<()> {
+        // let task_displays = self
+        //     .channels
+        //     .get::<tasks::TasksSubsystem>()
+        //     .send(tasks::GetTaskDisplays)
+        //     .await?;
 
         let benchmark_displays = self
             .channels
-            .tasks
+            .get::<tasks::TasksSubsystem>()
             .send(tasks::GetBenchmarkDisplays)
             .await?;
 
+        let task_displays = Vec::new(); 
+        
         {
-            let mut term_lock = self.terminal.lock().await;
+            let view = self.view
+                .lock()
+                .await;
+            
+            let mut term_lock = self.terminal
+                .lock()
+                .await;
 
             let term = term_lock
                 .as_mut()
                 .expect("Terminal not initialized!");
-
-            let view_lock = self.view.lock().await;
-
-            let view = view_lock.deref();
-
-            term.draw(|f| self.ui(f, view, task_displays, benchmark_displays))?;
-        };
-
-        self.events().await?;
+            
+            term.draw(|f| Self::ui(f, &view, task_displays, benchmark_displays))?;
+        }
+        
+        self.events()
+            .await?;
 
         Ok(())
     }
 
     fn ui(
-        &self,
         frame: &mut Frame,
         view: &TermView,
         tasks: Vec<tasks::Display>,
@@ -92,7 +111,7 @@ impl TerminalSubsystem {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Benchmarks")
+                    .title("Task Stack")
                     .title_style(Style::default().fg(Color::LightCyan)),
             )
             .header(headers.clone());
@@ -120,14 +139,14 @@ impl TerminalSubsystem {
             )
             .output_separator('|')
             .output_timestamp(None)
-            .output_level(Some(TuiLoggerLevelOutput::Long))
+            // .output_level(Some(TuiLoggerLevelOutput::Abbreviated))
             .output_target(false)
             .output_file(false)
             .output_line(false)
             .style_error(Style::default().fg(Color::Red))
             .style_warn(Style::default().fg(Color::Yellow))
             .style_info(Style::default().fg(Color::Green))
-            .style_trace(Style::default().fg(Color::Cyan))
+            .style_trace(Style::default().fg(Color::Blue))
             .style_debug(Style::default().fg(Color::Magenta));
 
         match view {
@@ -144,8 +163,6 @@ impl TerminalSubsystem {
                 frame.render_widget(logger, frame.area());
             }
         }
-
-        // Render the list instead of the paragraph
     }
 
     async fn events(&self) -> Result<()> {
@@ -153,8 +170,8 @@ impl TerminalSubsystem {
             if let Event::Key(key) = event::read()? {
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Char('q') {
                     self.channels
-                        .engine
-                        .send(engine::Quit)
+                        .get::<engine::EngineSubsystem>()
+                        .send(engine::RequestQuit)
                         .await?;
                 };
 
@@ -165,55 +182,18 @@ impl TerminalSubsystem {
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Char('2') {
                     *self.view.lock().await = TermView::Log;
                 }
+                
+                if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Up {
+                    
+                }
             }
         }
         Ok(())
     }
 
+    #[titan_core::task]
     fn shutdown(&self) -> Result<()> {
         ratatui::restore();
-        Ok(())
-    }
-}
-
-impl Subsystem for TerminalSubsystem {}
-
-pub struct Init;
-
-#[async_trait]
-impl Task<TerminalSubsystem> for Init {
-    type Output = ();
-
-    async fn execute(self, terminal: &TerminalSubsystem) -> Result<Self::Output> {
-        terminal.init().await?;
-        Ok(())
-    }
-}
-
-pub struct Render;
-
-#[async_trait]
-impl Task<TerminalSubsystem> for Render {
-    type Output = ();
-
-    fn benchmark() -> bool {
-        true
-    }
-
-    async fn execute(self, terminal: &TerminalSubsystem) -> Result<Self::Output> {
-        terminal.render().await?;
-        Ok(())
-    }
-}
-
-pub struct Shutdown;
-
-#[async_trait]
-impl Task<TerminalSubsystem> for Shutdown {
-    type Output = ();
-
-    async fn execute(self, terminal: &TerminalSubsystem) -> Result<Self::Output> {
-        terminal.shutdown()?;
         Ok(())
     }
 }

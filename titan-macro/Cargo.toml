@@ -9,6 +9,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "1.0", features = ["full"] }
+syn = { version = "2.0.90", features = ["full"] }
 proc-macro-crate = "3.2.0"
-async-trait = "0.1.83"
+anyhow = "1.0.94"
+nanoid = "0.4.0"

@@ -1,21 +1,20 @@
-use crate::Channels;
-use orx_concurrent_option::ConcurrentOption;
-use titan_core::{anyhow, runtime, subsystem, Result};
+use titan_core::{Result, runtime, anyhow, Channels, ArcLock};
 
 pub struct GraphicsSubsystem {
     pub channels: Channels,
-    pub device: ConcurrentOption<wgpu::Device>,
-    pub queue: ConcurrentOption<wgpu::Queue>,
+    pub device: ArcLock<Option<wgpu::Device>>,
+    pub queue: ArcLock<Option<wgpu::Queue>>,
 }
 
-#[subsystem]
+#[titan_core::subsystem]
 impl GraphicsSubsystem {
-    #[task]
+    
+    #[titan_core::task]
     async fn init(&self) -> Result<()> {
         let instance = wgpu::Instance::default();
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
@@ -23,8 +22,7 @@ impl GraphicsSubsystem {
             .await
             .ok_or(anyhow!("Graphics: Failed to request adapter"))?;
 
-        let (device, queue) = adapter
-            .request_device(
+        let (device, queue) = adapter.request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Titan Device"),
                     required_features: wgpu::Features::default(),
@@ -35,20 +33,21 @@ impl GraphicsSubsystem {
             )
             .await?;
 
-        self.device.replace(device);
-        self.queue.replace(queue);
+        self.device.write(Some(device))
+            .await;
+        
+        self.queue.write(Some(queue))
+            .await;
 
         Ok(())
     }
 
-    #[task(benchmark)]
-    async fn render(&self) -> Result<()> {
-        runtime::time::sleep(std::time::Duration::from_millis(8)).await;
-        Ok(())
+    #[titan_core::task(benchmark)]
+    async fn render(&self) {
+        
     }
 
-    #[task]
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
+    #[titan_core::task]
+    async fn shutdown(&self) {
     }
 }

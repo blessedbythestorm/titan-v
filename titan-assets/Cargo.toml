@@ -10,5 +10,5 @@ path = "../titan-core"
 version = "1.0.210"
 features = ["derive"]
 
-[dependencies.ad-astra]
-version = "1.0.0"
+[dependencies.notify-debouncer-full]
+version = "0.4.0"

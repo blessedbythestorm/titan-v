@@ -4,18 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-titan_core = { path = "../titan-core" }
-orx-concurrent-option = "1.3.0"
-ad-astra = "1.0.0"
 
-# [dependencies.titan-macro]
-# path = "../titan-macro"
+[dependencies.titan_core]
+path = "../titan-core"
+
+[dependencies.titan_assets]
+path = "../titan-assets"
 
 [dependencies.ratatui]
-version = "0.28.1"
+version = "0.29.0"
 
 [dependencies.tui-logger]
-version = "0.13.2"
+version = "0.14.1"
+features = ["tracing-support"]
 
 [dependencies.wgpu]
-version = "22.0.0"
+version = "23.0.1"

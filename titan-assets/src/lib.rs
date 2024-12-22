@@ -1,7 +1,3 @@
-use ad_astra::export;
+pub mod assets;
 
-mod assets;
-
-#[export(package)]
-#[derive(Default)]
-pub struct TitanAssetsPackage;
+pub use assets::ResourceSubsystem;

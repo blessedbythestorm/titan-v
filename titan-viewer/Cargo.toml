@@ -14,5 +14,5 @@ path = "src/main.rs"
 [dependencies.titan]
 path = "../titan"
 
-[dependencies.ad-astra]
-version = "1.0.0"
+[profile.release]
+opt-level = "s"
