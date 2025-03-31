@@ -1,35 +1,25 @@
-use std::{any::{Any, TypeId}, future::Future, pin::Pin, sync::atomic::AtomicBool, task::Poll};
-
-use crate::{tasks::{self, TasksSubsystem}, ArcLock};
-use anyhow::{anyhow, Result};
+use std::{any::Any, future::Future, pin::Pin, task::Poll};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::{stream::FuturesUnordered, Stream};
 use log::{error, trace};
 use tokio::{
     sync::{mpsc, oneshot}, time::Instant
 };
-use tracing::info;
+use tracing::{debug, info};
+use crate::{chrono, tasks::{self, TasksSubsystem}, ArcLock, Channels};
 
-#[async_trait]
-pub trait Task<S>: Send + 'static
-where
-    S: Subsystem,
-{
-    type Output: Send + 'static;
+pub trait Event: Send + 'static {}
 
-    async fn execute(self, _subsystem: &S) -> Result<Self::Output>
-    where Self: Sized {
-        panic!("This should never be called: exec");
-    }
+pub trait Task: Clone + Send + 'static {
+    type Subsystem: Subsystem;
+    type Event: Event;
 
-    async fn execute_mut(self, _subsystem: &mut S) -> Result<Self::Output>
-    where Self: Sized {
-        panic!("This should never be called: exec_mut")
-    }
-
+    type Inputs: Clone + Send + Sync + 'static;
+    
+    type Output: Send + Sync + 'static;    
+        
     fn name() -> &'static str;
-
-    fn is_mut() -> bool;
 
     fn log() -> bool {
         true
@@ -42,54 +32,29 @@ where
     fn io() -> bool {
         false
     }
-}
 
-#[async_trait]
-pub trait TaskMessage<S>: Send + 'static
-where
-    S: Subsystem,
-{
-    fn gen_id(&self) -> String;
+    fn inputs(&self) -> Self::Inputs;
+ }
 
-    fn log(&self) -> bool;
 
+pub trait TaskInfo: Send + 'static {
     fn name(&self) -> &'static str;
-
+    fn log(&self) -> bool;
     fn benchmark(&self) -> bool;
-
     fn io(&self) -> bool;
-
-    fn is_mut(&self) -> bool;
-
-    async fn execute_boxed(self: Box<Self>, subsystem: ArcLock<S>) -> Result<()>;
-    
+    fn new_id(&self) -> String;
 }
 
-struct TaskMessageImpl<S, T>
+impl<T> TaskInfo for T
 where
-    S: Subsystem,
-    T: Task<S>,
+    T: Task,
 {
-    task: T,
-    sender: oneshot::Sender<Result<T::Output>>,
-}
-
-#[async_trait]
-impl<S, T> TaskMessage<S> for TaskMessageImpl<S, T>
-where
-    S: Subsystem,
-    T: Task<S>,
-{
-    fn gen_id(&self) -> String {
-        format!("{}_{}", T::name(), nanoid::nanoid!(16))
+    fn name(&self) -> &'static str {
+        T::name()
     }
 
     fn log(&self) -> bool {
         T::log()
-    }
-
-    fn name(&self) -> &'static str {
-        T::name()
     }
 
     fn benchmark(&self) -> bool {
@@ -100,67 +65,172 @@ where
         T::io()
     }
 
-    fn is_mut(&self) -> bool {
-        T::is_mut()
+    fn new_id(&self) -> String {
+        format!("{}_{}", T::name(), nanoid::nanoid!(16))
     }
+}
 
-    async fn execute_boxed(self: Box<Self>, subsystem: ArcLock<S>) -> Result<()> {
 
-        let task_name = self.name();
+#[async_trait]
+pub trait ImmutableTask: Task {
+    async fn execute(self, _subsystem: &Self::Subsystem) -> Self::Output;
+}
+
+#[async_trait]
+pub trait MutableTask: Task {
+    async fn execute(self, _subsystem: &mut Self::Subsystem) -> Self::Output;
+}
+
+#[async_trait]
+pub trait SubsystemMessage<S>: Send + 'static
+where
+    S: Subsystem,
+{
+    fn task(&self) -> &dyn TaskInfo;
+     
+    async fn execute(self: Box<Self>, subsystem: ArcLock<S>) -> Result<()>;
+}
+
+struct ImmutableTaskMessage<T>
+where
+    T: ImmutableTask,
+{
+    task: T,
+    sender: oneshot::Sender<T::Output>,
+}
+
+impl<T> ImmutableTaskMessage<T>
+where
+    T: ImmutableTask
+{
+    pub fn from(task: T) -> (Box<dyn SubsystemMessage<T::Subsystem>>, oneshot::Receiver<T::Output>) {
+        let (sender, receiver) = oneshot::channel();
         
-        if self.is_mut() {
-            
-            trace!("{}: Pre-WriteLock", &task_name);
-            
-            let mut subsystem_ref = subsystem.lock().await;
+        let message = ImmutableTaskMessage { task, sender };
+        
+        (Box::new(message), receiver)
+    }
+}
 
-            trace!("{}: Post-WriteLock", &task_name);
+#[async_trait]
+impl<T> SubsystemMessage<T::Subsystem> for ImmutableTaskMessage<T>
+where
+    T: ImmutableTask,
+{
+    fn task(&self) -> &dyn TaskInfo {
+        &self.task
+    }
+    
+    async fn execute(self: Box<Self>, subsystem: ArcLock<T::Subsystem>) -> Result<()> {
 
-            trace!("{}: Pre-ExecuteMut", &task_name);
+        let task_name = T::name();
+        
+        trace!("{}: Pre-ReadLock", &task_name);
+        
+        let subsystem_ref = subsystem.read()
+            .await;
 
-            let result = self.task.execute_mut(&mut *subsystem_ref)
-                .await;
+        trace!("{}: Post-ReadLock", &task_name);
 
-            trace!("{}: Post-ExecuteMut", &task_name);
+        // subsystem_ref.channels()
+        //     .publish(self.task.clone())
+        //     .await;
+        
+        trace!("{}: Pre-Execute", &task_name);
+        
+        let task_result = self.task.execute(&subsystem_ref)
+            .await;
+        
+        trace!("{}: Post-Execute", &task_name);
+        trace!("{}: Pre-Response", &task_name);
 
-            trace!("{}: Pre-Response", &task_name);
+        let send_result = self.sender.send(task_result);
 
-            self.sender.send(result)
-                .map_err(|_| anyhow!("Failed to send mut task result!"))?;
-
-            trace!("{}: Post-Response", &task_name);
-            
-        } else {
-            trace!("{}: Pre-ReadLock", &task_name);
-            
-            let subsystem_ref = subsystem.read().await;
-
-            trace!("{}: Post-ReadLock", &task_name);
-
-            trace!("{}: Pre-Execute", &task_name);
-            
-            let result = self.task.execute(&subsystem_ref)
-                .await;
-
-            trace!("{}: Post-Execute", &task_name);
-            
-            trace!("{}: Pre-Respone", &task_name);
-            
-            self.sender.send(result)
-                .map_err(|_| anyhow!("Failed to send task result!"))?;
-
-            trace!("{}: Post-Response", &task_name);
+        if let Err(_err) = send_result {
+            error!("{}: Failed to send result back to task executor", &task_name);
         }
+
+        trace!("{}: Post-Response", &task_name);
         
         Ok(())
     }    
 }
 
-pub struct TaskHandle<T> {
-    receiver: oneshot::Receiver<Result<T>>,
+
+struct MutableTaskMessage<T>
+where
+    T: MutableTask,
+{
+    task: T,
+    sender: oneshot::Sender<T::Output>,
 }
 
-impl<T> Future for TaskHandle<T> {
+impl<T> MutableTaskMessage<T>
+where
+    T: MutableTask
+{
+    pub fn from(task: T) -> (Box<dyn SubsystemMessage<T::Subsystem>>, oneshot::Receiver<T::Output>) {
+        let (sender, receiver) = oneshot::channel();
+        
+        let message = MutableTaskMessage { task, sender };
+        
+        (Box::new(message), receiver)
+    }
+}
+
+#[async_trait]
+impl<T> SubsystemMessage<T::Subsystem> for MutableTaskMessage<T>
+where
+    T: MutableTask,
+{
+
+    fn task(&self) -> &dyn TaskInfo {
+        &self.task
+    }
+    
+    async fn execute(self: Box<Self>, subsystem: ArcLock<T::Subsystem>) -> Result<()> {
+
+        let task_name = T::name();
+        
+        trace!("{}: Pre-WriteLock", &task_name);
+        
+        let mut subsystem_ref = subsystem.lock()
+            .await;
+
+        trace!("{}: Post-WriteLock", &task_name);
+
+        // subsystem_ref.channels()
+        //     .publish_mut(self.task.clone())
+        //     .await;
+        
+        trace!("{}: Pre-Execute", &task_name);
+        
+        let task_result = self.task.execute(&mut subsystem_ref)
+            .await;
+        
+        trace!("{}: Post-Execute", &task_name);
+        trace!("{}: Pre-Response", &task_name);
+
+        let send_result = self.sender.send(task_result);
+
+        if let Err(_err) = send_result {
+            error!("{}: Failed to send result back to task executor", &task_name);
+        }
+        
+        trace!("{}: Post-Response", &task_name);    
+        
+        Ok(())
+    }    
+}
+
+pub struct TaskHandle<T>{
+    receiver: oneshot::Receiver<T>,
+}
+
+impl<T> Future for TaskHandle<T>
+where
+    T: Send + 'static
+{
     type Output = Result<T>;
 
     fn poll(
@@ -169,8 +239,8 @@ impl<T> Future for TaskHandle<T> {
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
         match Pin::new(&mut this.receiver).poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(anyhow::anyhow!("Task cancelled: {:?}", err))),
+            Poll::Ready(Ok(task_result)) => Poll::Ready(Ok(task_result)),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(anyhow::anyhow!("Error retrieving task result: {}", err))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -212,142 +282,171 @@ where
  
 // Subsystem trait definition
 pub trait Subsystem: Sized + Send + Sync + 'static {
-    fn start_quiet<S>(subsystem: S, mut subsystem_receiver: SubsystemReceiver<S>) -> ArcLock<bool>
+    fn name() -> &'static str;
+    
+    fn channels(&self) -> Channels;
+
+    fn start_quiet<S>(subsystem: S, mut subsystem_receiver: SubsystemReceiver<S>)
     where
         S: Subsystem,
-    {
-        let should_close = ArcLock::new(false);
-        let should_close_ext = should_close.clone();
-        
+    {        
         tokio::spawn(async move {
             let subsystem_inst = ArcLock::new(subsystem);
             let subsystem = subsystem_inst.clone();
                             
             while let Some(task_message) = subsystem_receiver.recv().await {
                 let subsystem = subsystem.clone();
-
-                trace!("{}: Received on Subsystem", task_message.name());
+                let subsystem_name = S::name();
                 
-                tokio::spawn(async move {
-                    task_message.execute_boxed(subsystem)
-                        .await;
-                });
-
-                if *should_close.read().await {
-                    break;
-                }
+                trace!("{} - {}: Received", &subsystem_name, task_message.task().name());
+            
+                launch_task(subsystem, task_message, None);                
             }
 
             info!("Subsystem stopped!");
         });
-
-        should_close_ext
     }
 
     fn start<S>(
         subsystem: S,
         mut subsystem_receiver: SubsystemReceiver<S>,
         tasks: SubsystemRef<TasksSubsystem>,
-    ) -> ArcLock<bool>
+    ) 
     where
         S: Subsystem,
-    {
-        let should_close = ArcLock::new(false);
-        let should_close_ext = should_close.clone();
-        
+    {        
         tokio::spawn(async move {
             let subsystem = ArcLock::new(subsystem);
             let subsystem = subsystem.clone();
             
             while let Some(task_message) = subsystem_receiver.recv().await {
                 let subsystem = subsystem.clone();
+                let subsystem_name = S::name();
                 let tasks = tasks.clone();
 
-                trace!("{}: Received on Subsystem", task_message.name());
+                trace!("{} - {}: Received", &subsystem_name, task_message.task().name());
 
-                match task_message.io() {
-                    false => {
-                        tokio::spawn(subsystem_run_task(subsystem, tasks, task_message));
-                    },
-                    true => {
-                        tokio::task::spawn_blocking(move || {
-                            tokio::runtime::Handle::current()
-                                .block_on(subsystem_run_task(subsystem, tasks, task_message));
-                        });
-                    },
-                };
-
-                if *should_close.read().await {
-                    break;
-                }
+                launch_task(subsystem, task_message, Some(tasks));
             }
 
             info!("Subsystem stopped!");                
         });
-
-        should_close_ext
     }
 }
 
+fn launch_task<S>(
+    subsystem: ArcLock<S>,
+    task_message: Box<dyn SubsystemMessage<S>>,    
+    tasks: Option<SubsystemRef<TasksSubsystem>>,
+)
+where
+    S: Subsystem
+{
+    let subsystem_name = S::name();
+    let task_name = task_message.task().name();
+    
+    match task_message.task().io() {
+        false => {
+            tokio::task::spawn(async move {
+                let exec_result = subsystem_run_task(subsystem, task_message, tasks)
+                    .await;
+
+                if let Err(err) = exec_result {
+                    error!("{} - {}: Execution error: {}",                            
+                        subsystem_name,
+                        task_name,
+                        err
+                    );
+                }
+            });
+        },
+        true => {
+            tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current()
+                    .block_on(async move {
+                        let exec_result = subsystem_run_task(subsystem, task_message, tasks)
+                            .await;
+
+                        if let Err(err) = exec_result {
+                            error!("{} - {}: Execution error: {}",                            
+                                subsystem_name,
+                                task_name,
+                                err
+                            );
+                        }
+                    });
+            });
+        },
+    };
+}
 
 async fn subsystem_run_task<S>(
     subsystem: ArcLock<S>,
-    tasks: SubsystemRef<TasksSubsystem>,
-    task_message: Box<dyn TaskMessage<S>>,
+    task_message: Box<dyn SubsystemMessage<S>>,    
+    tasks: Option<SubsystemRef<TasksSubsystem>>,
 ) -> Result<()>
 where
     S: Subsystem,
 {
-    let task_id = task_message.gen_id();
-    let task_name = task_message.name();
-    let task_logs = task_message.log();
-    let task_benchmarks = task_message.benchmark();
-    
+    let task_id = task_message.task().new_id();
+    let task_name = task_message.task().name();
+    let task_logs = task_message.task().log();
+    let task_benchmarks = task_message.task().benchmark();
+
     let time_start = Instant::now();
 
-    if task_logs && !task_benchmarks {
-        tasks.send(tasks::StartTask {
-            id: task_id.clone(),
-            name: task_name,
-            depth: 0,
-        }).await?;
+    if let Some(tasks) = tasks.as_ref() {
+        if task_logs && !task_benchmarks {
+            tasks.send(tasks::StartTask {
+                id: task_id.clone(),
+                name: task_name,
+                depth: 0,
+            })
+            .await?;
+        }
+
+        if task_benchmarks {
+            tasks.send(tasks::StartBenchmark {
+                name: task_name,
+            })
+            .await?;
+        }
     }
 
-    if task_benchmarks {
-        tasks.send(tasks::StartBenchmark {
-            name: task_name,
-        }).await;
-    }
-
-    task_message.execute_boxed(subsystem)
+    task_message.execute(subsystem)
         .await?;
-        
-    if task_logs && !task_benchmarks {
-        tasks.send(tasks::EndTask {
-            id: task_id,
-            end: time_start.elapsed().as_secs_f64(),
-            display: Box::new(|task: tasks::TaskLog| format!("{:.6}s", task.duration)),
-        }).await?;
-    }
 
-    if task_benchmarks {
-        tasks.send(tasks::EndBenchmark {
-            name: task_name,
-            end: time_start.elapsed().as_secs_f64() * 1000.0,
-            display: Box::new(|bench: tasks::BenchmarkLog| {
-                format!(
-                    "{:0>4.2} ms ~ [{:0>4.2} ms] <=> [{:0>4.2} ms - {:0>4.2} ms]",
-                    bench.duration, bench.average, bench.min, bench.max
-                )
-            }),
-        }).await?;
+    if let Some(tasks) = tasks.as_ref() {
+        if task_logs && !task_benchmarks {
+            tasks.send(tasks::EndTask {
+                id: task_id,
+                end: time_start.elapsed().as_secs_f64(),
+                display: |task| chrono::format_duration(&task.duration),
+            });
+        }
+
+        if task_benchmarks {
+            tasks.send(tasks::EndBenchmark {
+                name: task_name,
+                end: time_start.elapsed().as_secs_f64(),
+                display: |bench| {
+                    format!("{} ~ [{}] <=> [{} - {}]",
+                        &chrono::format_duration(&bench.duration),
+                        &chrono::format_duration(&bench.average),
+                        &chrono::format_duration(&bench.min),
+                        &chrono::format_duration(&bench.max)
+                    )
+                },
+            })
+            .await?;
+        }
     }
 
     Ok(())
 }
 
-pub type SubsystemReceiver<S> = mpsc::UnboundedReceiver<Box<dyn TaskMessage<S>>>;
-pub type SubsystemSender<S> = mpsc::UnboundedSender<Box<dyn TaskMessage<S>>>;
+pub type SubsystemReceiver<S> = mpsc::UnboundedReceiver<Box<dyn SubsystemMessage<S>>>;
+pub type SubsystemSender<S> = mpsc::UnboundedSender<Box<dyn SubsystemMessage<S>>>;
 
 pub struct SubsystemRef<S>
 where
@@ -380,25 +479,19 @@ where
 
     pub fn send<T>(&self, task: T) -> TaskHandle<T::Output>
     where
-        S: Subsystem,
-        T: Task<S>,
+        T: ImmutableTask<Subsystem = S>,
     {
-        let (sender, receiver) = oneshot::channel();
-
-        let task_message = TaskMessageImpl { task, sender };
-
-        let task_name = task_message.name();
-        let subsystem_name = TypeId::of::<S>();
-
-        let boxed_task_message: Box<dyn TaskMessage<S>> = Box::new(task_message);
+        let (task_message, task_receiver) = ImmutableTaskMessage::from(task);
+        let task_name = task_message.task().name(); 
 
         trace!("{}: Sender Pre-Send", &task_name);
 
-        let send_res = self.sender.send(boxed_task_message);
+        let send_res = self.sender.send(task_message);
 
         if let Err(err) = send_res {
-            error!(
-                "Failed to send task {} to subsystem {:?}: {}",
+            let subsystem_name = S::name();
+        
+            debug!("Failed to send task {} to subsystem {:?}: {}",
                 task_name,
                 subsystem_name,
                 err
@@ -407,14 +500,39 @@ where
 
         trace!("{}: Sender Post-Send", &task_name);
 
-        TaskHandle { receiver }
+        TaskHandle { receiver: task_receiver }
+    }
+
+    
+    pub fn send_mut<T>(&self, task: T) -> TaskHandle<T::Output>
+    where
+        T: MutableTask<Subsystem = S>,
+    {
+        let (mut_task_message, mut_task_receiver) = MutableTaskMessage::from(task);
+        let mut_task_name = mut_task_message.task().name();
+        
+        trace!("{}: Sender Pre-Send", &mut_task_name);
+
+        let send_res = self.sender.send(mut_task_message);
+
+        if let Err(err) = send_res {
+            let subsystem_name = S::name();
+            
+            debug!("Failed to send task {} to subsystem {:?}: {}",
+                mut_task_name,
+                subsystem_name,
+                err
+            );
+        }
+
+        trace!("{}: Sender Post-Send", &mut_task_name);
+
+        TaskHandle { receiver: mut_task_receiver }
     }
 
     pub fn send_batch<T>(&self, tasks: Vec<T>) -> BatchHandle<T::Output>
     where
-        S: Send + Sync + 'static,
-        T: Task<S> + Send + Sync + 'static,
-        T::Output: Send + 'static,
+        T: ImmutableTask<Subsystem = S>,
     {
         let handles = tasks
             .into_iter()
@@ -424,6 +542,18 @@ where
         BatchHandle::new(handles)
     }
 
+
+    pub fn send_batch_mut<T>(&self, tasks: Vec<T>) -> BatchHandle<T::Output>
+    where
+        T: MutableTask<Subsystem = S>,
+    {
+        let handles = tasks
+            .into_iter()
+            .map(|task| self.send_mut(task))
+            .collect();
+
+        BatchHandle::new(handles)
+    }
 }
 
 pub trait ErasedSubsystemRef: Send + Sync {    

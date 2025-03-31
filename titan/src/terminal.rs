@@ -9,8 +9,8 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::Stdout;
-use titan_core::{info, tasks, tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}, ArcLock, Channels, Result};
-use tui_logger::{TuiLoggerLevelOutput, TuiLoggerWidget};
+use titan_core::{info, tasks::{self, GetBenchmarkDisplays}, Channels, Result};
+use tui_logger::TuiLoggerWidget;
 
 type TitanTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -21,62 +21,50 @@ pub enum TermView {
 
 pub struct TerminalSubsystem {
     pub channels: Channels,
-    pub terminal: ArcLock<Option<TitanTerminal>>,
-    pub view: ArcLock<TermView>,
-    pub mut_test: bool,
+    pub terminal: Option<TitanTerminal>,
+    pub view: TermView,
+    pub task_displays: Vec<String>,
 }
 
 #[titan_core::subsystem]
 impl TerminalSubsystem {
 
     #[titan_core::task]
-    async fn init(&self) -> Result<()> {        
+    async fn init(&mut self) -> Result<()> {        
         tui_logger::init_logger(titan_core::log::LevelFilter::Trace)?;
                         
-        self.terminal.write(Some(ratatui::init()))
-         .await;
-        
-        Ok(())
-    }
-    
-    #[titan_core::task]
-    pub async fn mutable_task(&mut self) -> Result<()> {
-        self.mut_test = !self.mut_test;
-        info!("{}", self.mut_test);
+        self.terminal = Some(ratatui::init());
+
+        self.channels
+            .subscribe_mut::<tasks::StartTask, AddTaskDisplay>()
+            .await;
+                
         Ok(())
     }
 
+    #[titan_core::task]
+    async fn add_task_display(&mut self, id: String, name: &'static str, depth: usize) {
+        info!("Hello from subscription!");
+    }
+    
     #[titan_core::task(benchmark)]
     async fn render(&mut self) -> Result<()> {
         // let task_displays = self
         //     .channels
         //     .get::<tasks::TasksSubsystem>()
         //     .send(tasks::GetTaskDisplays)
-        //     .await?;
+        //     .await;
 
         let benchmark_displays = self
             .channels
             .get::<tasks::TasksSubsystem>()
             .send(tasks::GetBenchmarkDisplays)
             .await?;
-
-        let task_displays = Vec::new(); 
-        
-        {
-            let view = self.view
-                .lock()
-                .await;
-            
-            let mut term_lock = self.terminal
-                .lock()
-                .await;
-
-            let term = term_lock
-                .as_mut()
-                .expect("Terminal not initialized!");
-            
-            term.draw(|f| Self::ui(f, &view, task_displays, benchmark_displays))?;
-        }
+       
+        self.terminal
+            .as_mut()
+            .expect("Terminal not initialized!")
+            .draw(|f| Self::ui(f, &self.view, vec![], benchmark_displays))?;
         
         self.events()
             .await?;
@@ -165,22 +153,24 @@ impl TerminalSubsystem {
         }
     }
 
-    async fn events(&self) -> Result<()> {
+    async fn events(&mut self) -> Result<()> {
         if event::poll(std::time::Duration::from_secs(0))? {
+            info!("Checking events...");
             if let Event::Key(key) = event::read()? {
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Char('q') {
                     self.channels
                         .get::<engine::EngineSubsystem>()
-                        .send(engine::RequestQuit)
-                        .await?;
+                        .send_mut(engine::RequestQuit);
+                    
+                    info!("Here");
                 };
 
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Char('1') {
-                    *self.view.lock().await = TermView::Tasks;
+                    self.view = TermView::Tasks;
                 }
 
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Char('2') {
-                    *self.view.lock().await = TermView::Log;
+                    self.view = TermView::Log;
                 }
                 
                 if key.kind == event::KeyEventKind::Press && key.code == event::KeyCode::Up {

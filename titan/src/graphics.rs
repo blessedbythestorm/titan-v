@@ -1,4 +1,4 @@
-use titan_core::{Result, runtime, anyhow, Channels, ArcLock};
+use titan_core::{Result, anyhow, Channels, ArcLock};
 
 pub struct GraphicsSubsystem {
     pub channels: Channels,
@@ -43,8 +43,8 @@ impl GraphicsSubsystem {
     }
 
     #[titan_core::task(benchmark)]
-    async fn render(&self) {
-        
+    async fn render(&self) -> Result<()> {
+        Ok(())
     }
 
     #[titan_core::task]

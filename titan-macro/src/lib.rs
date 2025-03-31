@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::token::{Comma, Paren};
 use syn::{
     Attribute, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, PatType, ReturnType, Type, TypePath,
@@ -80,11 +80,21 @@ pub fn subsystem(_attr: TokenStream, item: TokenStream) -> TokenStream {
     
     let self_ty = &updated_impl.self_ty;
 
+    let subsystem_name = get_subsystem_name(self_ty);
+
     let expanded = quote! {
         #updated_impl
 
-        impl #titan_core_path::Subsystem for #self_ty {}
-
+        impl #titan_core_path::Subsystem for #self_ty {
+            fn name() -> &'static str {
+                #subsystem_name
+            }
+            
+            fn channels(&self) -> #titan_core_path::Channels {
+                self.channels.clone()
+            }
+        }
+            
         #(#generated_tasks)*
     };
 
@@ -171,7 +181,6 @@ struct TaskFunctionData {
     pub input_types: Vec<syn::Type>,
     pub input_names: Vec<syn::Pat>,
     pub is_async: bool,
-    pub returns_result: bool,
     pub output_type: syn::Type,
     pub macro_attributes: TaskMacroAttributes,
     pub generics: syn::Generics,
@@ -191,7 +200,7 @@ fn extract_task_function_data(method: ImplItemFn, macro_attributes: Attribute) -
     eprintln!("extract task data");
 
     let (task_input_types, task_input_names, task_mutability) = extract_params(task_input);
-    let (task_output_type, task_returns_result) = extract_output(task_output);
+    let task_output_type = extract_output(task_output);
 
     let macro_attributes = extract_macro_attributes(&macro_attributes);
 
@@ -200,7 +209,6 @@ fn extract_task_function_data(method: ImplItemFn, macro_attributes: Attribute) -
         input_types: task_input_types,
         input_names: task_input_names,
         is_async: task_async,
-        returns_result: task_returns_result,
         output_type: task_output_type,
         macro_attributes,
         generics: task_generics,
@@ -243,36 +251,19 @@ fn extract_params(task_params: Punctuated<FnArg, Comma>) -> (Vec<syn::Type>, Vec
     (task_call_param_types, task_call_param_names, task_is_mut)
 }
 
-fn extract_output(task_output: ReturnType) -> (syn::Type, bool) {
+fn extract_output(task_output: ReturnType) -> syn::Type {
     eprintln!("extract output");
     
     match task_output {
         syn::ReturnType::Type(_, ty) => {
-            if let Type::Path(TypePath { path, .. }) = &(*ty) {
-                // Check if the return type is Result<T>
-                if let Some(segment) = path.segments.last() {
-                    if segment.ident == "Result" {
-                        // It's a Result<T>
-                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                                return (inner_ty.clone(), true);
-                            }
-                        }
-                    }
-                }
-            }
-            // It's some other type T
-            ((*ty).clone(), false)
+            (*ty).clone()
         }
         syn::ReturnType::Default => {
             // No return type specified, so it's `()`
-            (
-                syn::Type::Tuple(TypeTuple {
-                    paren_token: Paren::default(),
-                    elems: Punctuated::new(),
-                }),
-                false,
-            )
+            syn::Type::Tuple(TypeTuple {
+                paren_token: Paren::default(),
+                elems: Punctuated::new(),
+            })
         }
     }
 }
@@ -314,11 +305,13 @@ fn build_task_struct(task_data: &TaskFunctionData) -> proc_macro2::TokenStream {
     match task_data.input_types.is_empty() {
         true => {
             quote! {
+                #[derive(Clone)]
                 pub struct #task_name;
             }
         }
         false => {
             quote! {
+                #[derive(Clone)]
                 pub struct #task_name #generics
                 #where_clause {
                     #(#task_fields),*
@@ -337,8 +330,11 @@ fn build_task_impl(
      
     let titan_core_path = get_crate_path("titan_core")
         .expect("Failed to find titan_core!");
-
+    
     let task_name = get_task_name(&task_data.name.to_string());
+    let task_input_types = &task_data.input_types;
+    let task_input_names = &task_data.input_names;
+    let task_trait = build_task_trait(&titan_core_path.to_string(), task_data);
     let output_type = &task_data.output_type;
     let id_fn = build_id_functions(task_data, module_path);
     let benchmark_fn = build_task_benchmark_function(task_data);
@@ -346,17 +342,62 @@ fn build_task_impl(
     let execute_fn = build_task_execute_function(subsystem_type, task_data);
     let generics = &task_data.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    quote! {
-        #[#titan_core_path::async_trait]
-        impl #impl_generics #titan_core_path::Task<#subsystem_type> for #task_name #ty_generics
+    let event_name = format_ident!("On{}", task_name);
+    
+    let inputs_tuple = if task_input_names.is_empty() {
+            quote! { () }
+        } else {
+            let inputs = task_input_names.iter().map(|name| {
+                // Assuming that the fields implement Clone. Adjust if necessary.
+                quote! { self.#name.clone() }
+            });
+            
+            quote! { ( #(#inputs),* ) }
+        };
+        
+    quote! {        
+        impl #impl_generics #titan_core_path::Task for #task_name #ty_generics
         #where_clause {
+            type Subsystem = #subsystem_type;
+            type Inputs = (#(#task_input_types),*);
             type Output = #output_type;
+            type Event = #event_name;
             #id_fn
             #io_fn
             #benchmark_fn
+
+            fn inputs(&self) -> Self::Inputs {
+                #inputs_tuple
+            }
+        }
+
+        #[#titan_core_path::async_trait]
+        impl #impl_generics #task_trait for #task_name #ty_generics
+        #where_clause {
             #execute_fn
         }
+
+        impl #impl_generics From<(#(#task_input_types),*)> for #task_name #ty_generics
+        #where_clause {
+            fn from((#(#task_input_names),*): (#(#task_input_types),*)) -> Self {
+                Self {
+                    #(#task_input_names),*
+                }
+            }
+        }
+                
+        pub struct #event_name;
+        impl #titan_core_path::Event for #event_name {}
+    }
+}
+
+fn build_task_trait(titan_core_path: &str, task_data: &TaskFunctionData) -> proc_macro2::TokenStream {
+    if task_data.is_mut {
+        let path = syn::Ident::new(titan_core_path, proc_macro2::Span::call_site());
+        quote! { #path::MutableTask }
+    } else {
+        let path = syn::Ident::new(titan_core_path, proc_macro2::Span::call_site());
+        quote! { #path::ImmutableTask }
     }
 }
 
@@ -369,15 +410,10 @@ fn build_id_functions(task_data: &TaskFunctionData, module_path: String) -> proc
     let task_name = get_task_name(&task_data.name.to_string());
     let task_name = format!("{}::{}", &module_name, task_name);
     let task_name = LitStr::new(&task_name.to_string(), Span::call_site());
-    let task_is_mut = task_data.is_mut;
 
     quote!{
         fn name() -> &'static str {
             #task_name
-        }
-
-        fn is_mut() -> bool {
-            #task_is_mut
         }
     }
 }
@@ -413,10 +449,7 @@ fn build_task_execute_function(
     task_data: &TaskFunctionData,
 ) -> proc_macro2::TokenStream {
     eprintln!("build task execute fn");
-    
-    let titan_core_path = get_crate_path("titan_core")
-        .expect("Failed to find titan_core!");
-    
+        
     let task_name = &task_data.name;
     
     let task_args = task_data.input_names.iter()
@@ -433,27 +466,35 @@ fn build_task_execute_function(
         quote! {}
     };
         
-    // Determine if `?` should be used for error handling
-    let result_execute = if task_data.returns_result {
-        quote! { ? }
-    } else {
-        quote! {}
-    };
-        
     // Conditionally generate the `execute_mut` function if `is_mut` is true
     if task_data.is_mut {
         quote! {
-            async fn execute_mut(self, subsystem: &mut #subsystem_type) -> #titan_core_path::Result<Self::Output> {
-                Ok(#execute_call #await_execute #result_execute)
+            async fn execute(self, subsystem: &mut Self::Subsystem) -> Self::Output {
+                #execute_call #await_execute
             }
         }
     } else {
         quote! {
-            async fn execute(self, subsystem: &#subsystem_type) -> #titan_core_path::Result<Self::Output> {
-                Ok(#execute_call #await_execute #result_execute)
+            async fn execute(self, subsystem: &Self::Subsystem) -> Self::Output {
+                #execute_call #await_execute
             }
         }
     }    
+}
+
+
+fn get_subsystem_name(impl_ty: &syn::Type) -> syn::LitStr {
+    match impl_ty {
+        syn::Type::Path(type_path) => {
+            // e.g. for `impl engine::EngineSubsystem`, the segments are
+            // ["engine", "EngineSubsystem"].
+            let last_seg = type_path.path.segments.last().unwrap();
+            // e.g. "EngineSubsystem"
+            let last_ident_str = last_seg.ident.to_string();
+            syn::LitStr::new(&last_ident_str, proc_macro2::Span::call_site())
+        }
+        _ => panic!("Expected Type::Path in impl!"),
+    }
 }
 
 fn get_task_name(function_name: &str) -> syn::Ident {

@@ -19,7 +19,7 @@ const HELIX_IGNORE_TEMPLATE: &str = include_str!("../template/helix/helix_.ignor
 const HELIX_LANGUAGES_TEMPLATE: &str =
     include_str!("../template/helix/helix_languages_template.toml");
 const HELIX_ADASTRA_GRAMMARS_DIR: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/template/scripting/adastra");
+    include_dir!("$CARGO_MANIFEST_DIR/template/scripting");
 const HELIX_ADASTRA_QUERIES_TEMPLATE: &str = include_str!("../template/scripting/highlights.scm");
 
 #[derive(Parser)]
@@ -68,7 +68,7 @@ fn deinit(app_name: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn init(name: &String, helix: bool) -> std::io::Result<()> {
+fn init(name: &str, helix: bool) -> std::io::Result<()> {
     // Get the directory from which the command was called
     let current_dir = env::current_dir()?;
     println!("Current directory: {}", current_dir.display());

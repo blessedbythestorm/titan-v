@@ -1,5 +1,6 @@
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{future::Future, sync::Arc};
+use crate::{Result, anyhow};
 
 pub struct ArcLock<T>
 where
@@ -23,9 +24,23 @@ where
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
         self.data.read().await
     }
+    
+    pub fn read_sync(&self) -> Result<RwLockReadGuard<'_, T>> {
+        match self.data.try_read() {
+            Ok(guard) => Ok(guard),
+            Err(err) => Err(anyhow!("Failed to lock channels: {}", err))
+        }
+    }
         
     pub async fn lock(&self) -> RwLockWriteGuard<'_, T> {
         self.data.write().await
+    }
+
+    pub fn lock_sync(&self) -> Result<RwLockWriteGuard<'_, T>> {
+        match self.data.try_write() {
+            Ok(guard) => Ok(guard),
+            Err(err) => Err(anyhow!("Failed to lock channels: {}", err))
+        }
     }
 
     pub async fn write(&self, val: T) {

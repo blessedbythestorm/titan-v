@@ -1,7 +1,7 @@
 use notify_debouncer_full::{new_debouncer, notify::*, DebounceEventResult, Debouncer, RecommendedCache};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
-use titan_core::{error, info, ArcLock, Result};
+use titan_core::{error, info, ArcLock, Channels, Result};
 
 pub struct DiskResourceDef {
     extensions: &'static [&'static str],
@@ -39,6 +39,7 @@ pub struct AssetsConfig {
 }
 
 pub struct ResourceSubsystem {
+    pub channels: Channels,
     pub assets_dir: PathBuf,
     pub watcher: ArcLock<Option<Debouncer<RecommendedWatcher, RecommendedCache>>>
     // pub resources: DashMap<String, Resource>,
@@ -47,7 +48,7 @@ pub struct ResourceSubsystem {
 #[titan_core::subsystem]
 impl ResourceSubsystem {
     
-    #[titan_core::task(io)]
+    #[titan_core::task]
     pub async fn init(&self) -> Result<()> {
     
         let watcher = new_debouncer(

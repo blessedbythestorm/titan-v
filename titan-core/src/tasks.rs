@@ -1,10 +1,7 @@
-use crate::{subsystem::{Subsystem, Task}, ArcLock};
 use indexmap::IndexMap;
-use titan_macro::{subsystem, task};
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
-use tokio::sync::Mutex;
-use crate::{Result, async_trait};
+use crate::{ArcLock, Channels};
 
+#[derive(Clone, Default)]
 pub struct Display {
     pub name: String,
     pub display: String,
@@ -35,6 +32,7 @@ pub struct BenchmarkLog {
 }
 
 pub struct TasksSubsystem {
+    pub channels: Channels,
     pub tasks: ArcLock<IndexMap<String, TaskLog>>,
     pub benchmarks: ArcLock<IndexMap<&'static str, BenchmarkLog>>,
 }
@@ -43,7 +41,7 @@ pub struct TasksSubsystem {
 impl TasksSubsystem {
 
     #[crate::task]
-    async fn start_task(&self, id: String, name: &'static str, depth: usize) -> Result<()> {
+    async fn start_task(&self, id: String, name: &'static str, depth: usize) {
          
         let task = TaskLog {
             id,
@@ -60,31 +58,42 @@ impl TasksSubsystem {
             .await
             .entry(task.id.clone())
             .or_insert(task);
-
-        Ok(())
     }
 
     #[crate::task]
-    async fn end_task<F>(&self, id: String, end: f64, display: Box<F>)
+    async fn end_task<F>(&self, id: String, end: f64, display: F) -> Display 
     where
-        F: FnOnce(TaskLog) -> String + Send + 'static,
+        F: Fn(&TaskLog) -> String + Clone + Send + Sync + 'static,
     {
         self.tasks
             .lock()
             .await
-            .entry(id)
+            .entry(id.clone())
             .and_modify(|task| {
                 task.complete = true;
                 task.duration = end;
-                task.display = display(task.clone());
+                task.display = display(task);
             });
+
+        let task_lock = self.tasks
+            .lock()
+            .await;
+
+        let task = task_lock
+            .get(&id)
+            .expect("Failed to get task log!");
+
+        Display {
+            name: task.name.to_string(),
+            display: task.display.clone(),
+        }
     }
 
     #[crate::task]
     async fn get_task_displays(&self) -> Vec<Display> {
-        let task_lock = self.tasks.lock().await;
-
-        task_lock
+        self.tasks
+            .lock()
+            .await
             .values()
             .map(|task| Display {
                 name: format!("{} - {}", task.name, task.depth),
@@ -106,7 +115,7 @@ impl TasksSubsystem {
             max: 0.0,
             min: f64::MAX,
         };
-         
+          
         self.benchmarks
             .lock()
             .await
@@ -115,9 +124,9 @@ impl TasksSubsystem {
     }
 
     #[crate::task]
-    async fn end_benchmark<F>(&self, name: &'static str, end: f64, display: Box<F>)
+    async fn end_benchmark<F>(&self, name: &'static str, end: f64, display: F)
     where
-        F: FnOnce(BenchmarkLog) -> String + Send + 'static,
+        F: Fn(&BenchmarkLog) -> String + Clone + Send + Sync + 'static,
     {
         self.benchmarks
             .lock()
@@ -130,15 +139,16 @@ impl TasksSubsystem {
                 task.average = task.run_time / task.runs as f64;
                 task.max = f64::max(task.duration, task.max);
                 task.min = f64::min(task.duration, task.min);
-                task.display = display(task.clone())
+                task.display = display(task)
             });
     }
 
     #[crate::task]
     async fn get_benchmark_displays(&self) -> Vec<Display> {
-        let bench_lock = self.benchmarks.lock().await;
-
-        bench_lock
+        
+        self.benchmarks
+            .lock()
+            .await
             .values()
             .map(|bench| Display {
                 name: bench.name.to_string(),

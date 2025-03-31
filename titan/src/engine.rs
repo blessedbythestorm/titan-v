@@ -3,15 +3,15 @@ use crate::{
     terminal::{self, TerminalSubsystem},
     App, Channels,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use titan_assets::{assets, ResourceSubsystem};
-use titan_core::{info, runtime::{self, time::Instant}, tasks::{self, TasksSubsystem}, Result};
+use titan_core::{chrono, runtime::time::Instant, tasks::{self, TasksSubsystem}, Result};
+use titan_core::info;
 
 pub struct EngineSubsystem {
     pub channels: Channels,
-    pub quit: AtomicBool,
+    pub quit: bool,
     pub app: Box<dyn App>,
-    pub mut_test: bool,
+    pub renders: u32,
 }
 
 #[titan_core::subsystem]
@@ -19,89 +19,86 @@ impl EngineSubsystem {
     
     #[titan_core::task]
     pub async fn init(&self) -> Result<()> {
-        self.channels
-            .get::<TerminalSubsystem>()
-            .send(terminal::Init)
-            .await?;
-
-        let resources = self.channels
-            .get::<ResourceSubsystem>()
-            .send(assets::Init);
         
-        let graphics = self.channels
+        #[cfg(not(feature = "tracing"))] {
+            self.channels
+                .get::<TerminalSubsystem>()
+                .send_mut(terminal::Init)
+                .await??;
+        }
+
+        self.channels
+            .get::<ResourceSubsystem>()
+            .send(assets::Init)
+            .await??;
+        
+        self.channels
             .get::<GraphicsSubsystem>()
-            .send(graphics::Init);
-
-        let (resources, graphics) = runtime::join!(resources, graphics);
-
-        resources?;
-        graphics?;
-            
+            .send(graphics::Init)
+            .await??;
+             
         Ok(())
     }
 
     #[titan_core::task]
     pub async fn run(&self) -> Result<()> {
+                      
+        let benchmark_name = "engine::Fps";
+        let frame_start = Instant::now();
 
-        while !self.should_quit() {
+        self.channels
+            .get::<TasksSubsystem>()
+            .send(tasks::StartBenchmark {
+                name: benchmark_name,
+            })
+            .await?;
         
-            let benchmark_name = "engine::Fps";
-            let frame_start = Instant::now();
-
-            self.channels
-                .get::<TasksSubsystem>()
-                .send(tasks::StartBenchmark {
-                    name: benchmark_name,
-                }).await?;
-
+        #[cfg(not(feature = "tracing"))] {
             self.channels
                 .get::<TerminalSubsystem>()
-                .send(terminal::Render)
-                .await?;
-                        
-            self.channels
-                .get::<TerminalSubsystem>()
-                .send(terminal::MutableTask)
-                .await?;
-            
-            self.channels
-                .get::<GraphicsSubsystem>()
-                .send(graphics::Render)
-                .await?;
-
-            self.channels
-                .get::<TasksSubsystem>()
-                .send(tasks::EndBenchmark {
-                    name: benchmark_name,
-                    end: frame_start.elapsed().as_secs_f64() * 1000.0,
-                    display: Box::new(|bench: tasks::BenchmarkLog| {
-                        format!(
-                            "{:0<4.0} [{:0<4.2} ms] ~ {:.0} [{:0<4.2} ms] <=> [{:.0} - {:.0}]",
-                            1000.0 / bench.duration,
-                            bench.duration,
-                            (bench.runs as f64) * 1000.0 / bench.run_time,
-                            bench.average,
-                            1000.0 / bench.max,
-                            1000.0 / bench.min,
-                        )
-                    }),
-                }).await?;
+                .send_mut(terminal::Render)
+                .await??;
         }
+                                
+        self.channels
+            .get::<GraphicsSubsystem>()
+            .send(graphics::Render)
+            .await??;
+        
+        // future::try_join_all(vec![frame_render])
+        //     .await?;
+        
+        self.channels
+            .get::<TasksSubsystem>()
+            .send(tasks::EndBenchmark {
+                name: benchmark_name,
+                end: frame_start.elapsed().as_secs_f64(),
+                display: |bench| {
+                    format!(
+                        "{:>4.0} [{}] ~ {:>4.0} [{}] <=> [{:.0} - {:.0}]",
+                        1.0 / bench.duration,
+                        &chrono::format_duration(&bench.duration),
+                        (bench.runs as f64) * 1.0 / bench.run_time,
+                        &chrono::format_duration(&bench.average),
+                        1.0 / bench.max,
+                        1.0 / bench.min,
+                    )
+                },
+            })
+            .await?;
 
         Ok(())
     }
 
     #[titan_core::task]
-    pub fn request_quit(&self) {
+    pub fn request_quit(&mut self) {
         info!("Quit requested...");
-        
-        self.quit
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.quit = true;
     }
 
+    #[titan_core::task]
     pub fn should_quit(&self) -> bool {
         self.quit
-            .load(Ordering::Relaxed)
     }
 
     #[titan_core::task]
@@ -114,7 +111,7 @@ impl EngineSubsystem {
         self.channels
             .get::<TerminalSubsystem>()
             .send(terminal::Shutdown)
-            .await?;
+            .await??;
 
         Ok(())
     }

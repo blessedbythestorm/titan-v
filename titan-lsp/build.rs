@@ -1,5 +1,4 @@
 use std::env;
-use std::process::Command;
 
 fn main() {
     // Only trigger a build for titan-viewer if this is not already a workspace build.

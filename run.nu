@@ -1,3 +1,3 @@
 # run.nu
 
-RUST_LOG=info cargo run --bin titan-viewer --release
+RUST_LOG=trace cargo run --bin titan-viewer --release
